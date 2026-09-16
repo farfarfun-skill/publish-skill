@@ -46,22 +46,38 @@ done
 Use $publish-skill to validate this repository's SKILL.md files before I publish it.
 ```
 
-也可以直接运行确定性脚本：
+也可以直接运行确定性脚本。一键发布 `farfarfun-skill` 组织下的所有 skill 仓库：
 
 ```bash
 cd skills/publish-skill
+python3 scripts/skill_publisher.py org --org farfarfun-skill --workspaces-dir /home/bingtao/workspace/github/farfarfun-skill
+```
 
-# 1. 校验：每个 skills/<slug>/SKILL.md 的 frontmatter 和正文是否合规
+`workspaces-dir` 默认就是 `--workspace`（默认当前目录）的上一级目录，所以在 `publish-skill` 仓库自己的目录下直接运行也能自动发现同级的 `project-manager`、`lang-spec-hub`、`paperclip-governance`、`service-governance` 等仓库。它会：
+
+1. 列出该组织下所有公开、非 fork 的仓库；本地缺失的自动 `git clone`，已存在的直接用（不会 `pull`）。
+2. 对每个含 `skills/` 目录的仓库跑 `validate`，没有 `skills/` 目录的仓库（如 `.github`）会被跳过而不是判失败。
+3. 汇总打印整个组织的 `npx skills add <owner>/<repo> --skill <name>` 安装清单——skills.sh 没有提交入口，这份清单就是"发布"的产物。
+
+可选参数：
+
+- `--register`：为每个通过校验的 skill 额外在本机执行一次 `npx skills add ... -y`，这是真正会给 skills.sh 安装遥测/排行榜贡献数据的动作（也会把 skill 装进本机 agent 目录，注意副作用）。
+- `--mirror-to farfarfun-skills`：额外把每个通过校验的仓库 fork/同步到另一个组织。
+
+单仓库场景也可以用更细粒度的子命令：
+
+```bash
+# 校验：单个仓库里每个 skills/<slug>/SKILL.md 的 frontmatter 和正文是否合规
 python3 scripts/skill_publisher.py validate --workspace /path/to/repo --fail-on block
 
-# 2. 生成安装清单：skills.sh 没有提交入口，装的人直接用这条命令
+# 生成单个仓库的安装清单
 python3 scripts/skill_publisher.py manifest --workspace /path/to/repo
 
-# 3. 可选：镜像到另一个 GitHub 组织（例如聚合类的 marketplace 组织）
+# 把单个仓库镜像到另一个 GitHub 组织
 python3 scripts/skill_publisher.py mirror --workspace /path/to/repo --target-org farfarfun-skills
 ```
 
-`all` 子命令会依次跑 `validate` 和 `manifest`；`mirror` 会改变远端 GitHub 状态，需单独调用，且只应该在 `validate` 通过之后运行。
+`all` 子命令会依次跑 `validate` 和 `manifest`；`mirror` 会改变远端 GitHub 状态，只应该在 `validate` 通过之后运行。
 
 ## Validation
 

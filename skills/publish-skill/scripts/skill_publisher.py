@@ -179,6 +179,112 @@ def mirror(workspace: Path, target_org: str, fork_name: str | None) -> dict:
     return {"ok": True, "action": action, "target": target_slug, "url": f"https://github.com/{target_slug}"}
 
 
+def list_org_repos(org: str) -> list[str]:
+    result = run_gh([
+        "repo", "list", org,
+        "--visibility", "public",
+        "--source",
+        "--no-archived",
+        "--json", "name",
+        "--limit", "200",
+    ])
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "gh repo list failed")
+    return sorted(item["name"] for item in json.loads(result.stdout))
+
+
+def ensure_clone(org: str, repo: str, workspaces_dir: Path) -> Path:
+    target = workspaces_dir / repo
+    if not target.exists():
+        subprocess.run(
+            ["git", "clone", f"https://github.com/{org}/{repo}.git", str(target)],
+            check=True, timeout=120,
+        )
+    return target
+
+
+def register_skill(slug: str, name: str) -> dict:
+    result = subprocess.run(
+        ["npx", "--yes", "skills", "add", slug, "--skill", name, "-y"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    return {
+        "skill": name,
+        "ok": result.returncode == 0,
+        "error": None if result.returncode == 0 else (result.stderr.strip() or result.stdout.strip()),
+    }
+
+
+def publish_org(org: str, workspaces_dir: Path, register: bool, mirror_to: str | None) -> dict:
+    workspaces_dir.mkdir(parents=True, exist_ok=True)
+    repos = list_org_repos(org)
+    repo_reports = []
+    all_skills: list[dict] = []
+
+    for repo in repos:
+        entry: dict = {"repo": repo}
+        try:
+            workspace = ensure_clone(org, repo, workspaces_dir)
+        except subprocess.CalledProcessError as error:
+            entry["status"] = "error"
+            entry["error"] = f"git clone 失败：{error}"
+            repo_reports.append(entry)
+            continue
+
+        if not (workspace / "skills").is_dir():
+            entry["status"] = "skipped"
+            entry["reason"] = "没有 skills/ 目录，不是一个 skill 仓库"
+            repo_reports.append(entry)
+            continue
+
+        report = analyze_validate(workspace)
+        entry["status"] = report["decision"]
+        entry["findings"] = report["findings"]
+
+        if report["decision"] != "block":
+            manifest = build_manifest(workspace)
+            entry["skills"] = manifest["skills"]
+            all_skills.extend(manifest["skills"])
+
+            if register:
+                entry["register_results"] = [
+                    register_skill(skill["repo"], skill["skill"])
+                    for skill in manifest["skills"]
+                    if skill.get("repo")
+                ]
+
+            if mirror_to:
+                entry["mirror"] = mirror(workspace, mirror_to, None)
+
+        repo_reports.append(entry)
+
+    return {"org": org, "repos": repo_reports, "skills": all_skills}
+
+
+def render_org_text(result: dict) -> str:
+    lines = [f"org: {result['org']}", f"total publishable skills: {len(result['skills'])}", ""]
+    for entry in result["repos"]:
+        status = entry.get("status", "unknown")
+        lines.append(f"[{status}] {entry['repo']}")
+        if status == "skipped":
+            lines.append(f"    {entry['reason']}")
+        elif status == "error":
+            lines.append(f"    {entry['error']}")
+        else:
+            for item in entry.get("findings", []):
+                lines.append(f"    {item['severity'].upper()}: {item['path']} - {item['message']}")
+            for skill in entry.get("skills", []):
+                lines.append(f"    - {skill.get('install', skill['skill'])}")
+            for reg in entry.get("register_results", []):
+                mark = "ok" if reg["ok"] else f"FAILED: {reg['error']}"
+                lines.append(f"    register {reg['skill']}: {mark}")
+            if "mirror" in entry:
+                m = entry["mirror"]
+                mark = m.get("url", m.get("error")) if m.get("ok") else f"FAILED: {m.get('error')}"
+                lines.append(f"    mirror: {mark}")
+    return "\n".join(lines)
+
+
 def render_report_text(report: dict) -> str:
     lines = [f"decision: {report['decision']}"]
     lines.extend(f"PASS: {item}" for item in report["passes"])
@@ -219,6 +325,14 @@ def cmd_mirror(args: argparse.Namespace) -> int:
     return 0 if result.get("ok") else 1
 
 
+def cmd_org(args: argparse.Namespace) -> int:
+    workspace = Path(args.workspace).resolve()
+    workspaces_dir = Path(args.workspaces_dir).resolve() if args.workspaces_dir else workspace.parent
+    result = publish_org(args.org, workspaces_dir, args.register, args.mirror_to)
+    print(json.dumps(result, ensure_ascii=False, indent=2) if args.format == "json" else render_org_text(result))
+    return 0 if all(entry.get("status") != "block" and entry.get("status") != "error" for entry in result["repos"]) else 1
+
+
 def cmd_all(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace).resolve()
     report = analyze_validate(workspace)
@@ -256,6 +370,25 @@ def main() -> int:
     all_parser = subparsers.add_parser("all", parents=[common], help="依次运行 validate 与 manifest（不含 mirror）")
     all_parser.add_argument("--fail-on", choices=("revise", "block"))
     all_parser.set_defaults(func=cmd_all)
+
+    org_parser = subparsers.add_parser(
+        "org", parents=[common],
+        help="发现并发布整个 GitHub 组织下的所有 skill 仓库（一键发布入口）",
+    )
+    org_parser.add_argument("--org", default="farfarfun-skill", help="要发布的 GitHub 组织")
+    org_parser.add_argument(
+        "--workspaces-dir", default=None,
+        help="本地仓库的父目录；已存在的仓库直接使用（不会 pull），缺失的会被克隆到这里。默认是 --workspace 的上一级目录",
+    )
+    org_parser.add_argument(
+        "--register", action="store_true",
+        help="额外为每个通过校验的 skill 本地执行 `npx skills add`，为 skills.sh 的安装遥测/排行榜贡献数据，并把 skill 安装进本机 agent 目录",
+    )
+    org_parser.add_argument(
+        "--mirror-to", default=None,
+        help="额外把每个通过校验的仓库 fork/同步到这个组织（例如 farfarfun-skills）",
+    )
+    org_parser.set_defaults(func=cmd_org)
 
     args = parser.parse_args()
     return args.func(args)

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.skill_publisher import analyze_validate, build_manifest
+from scripts.skill_publisher import analyze_validate, build_manifest, publish_org
 
 VALID_BODY = (
     "\n# Demo Skill\n\n"
@@ -115,6 +115,63 @@ class ManifestTests(unittest.TestCase):
                 manifest = build_manifest(workspace)
             self.assertIsNone(manifest["repo"])
             self.assertNotIn("install", manifest["skills"][0])
+
+
+class PublishOrgTests(unittest.TestCase):
+    def test_skips_repo_without_skills_dir_and_aggregates_the_rest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspaces_dir = Path(temp_dir)
+            (workspaces_dir / "no-skills-repo").mkdir()
+            write_skill(workspaces_dir / "good-repo", "demo-skill", "demo-skill", VALID_DESCRIPTION)
+
+            def fake_ensure_clone(org, repo, ws_dir):
+                return ws_dir / repo
+
+            with patch("scripts.skill_publisher.list_org_repos", return_value=["no-skills-repo", "good-repo"]), \
+                 patch("scripts.skill_publisher.ensure_clone", side_effect=fake_ensure_clone), \
+                 patch("scripts.skill_publisher.resolve_repo_slug", return_value="acme/good-repo"):
+                result = publish_org("acme", workspaces_dir, register=False, mirror_to=None)
+
+            statuses = {entry["repo"]: entry["status"] for entry in result["repos"]}
+            self.assertEqual("skipped", statuses["no-skills-repo"])
+            self.assertEqual("allow", statuses["good-repo"])
+            self.assertEqual(1, len(result["skills"]))
+            self.assertEqual(
+                "npx skills add acme/good-repo --skill demo-skill",
+                result["skills"][0]["install"],
+            )
+
+    def test_register_flag_calls_register_skill_for_each_valid_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspaces_dir = Path(temp_dir)
+            write_skill(workspaces_dir / "good-repo", "demo-skill", "demo-skill", VALID_DESCRIPTION)
+
+            def fake_ensure_clone(org, repo, ws_dir):
+                return ws_dir / repo
+
+            with patch("scripts.skill_publisher.list_org_repos", return_value=["good-repo"]), \
+                 patch("scripts.skill_publisher.ensure_clone", side_effect=fake_ensure_clone), \
+                 patch("scripts.skill_publisher.resolve_repo_slug", return_value="acme/good-repo"), \
+                 patch("scripts.skill_publisher.register_skill", return_value={"skill": "demo-skill", "ok": True, "error": None}) as register_mock:
+                result = publish_org("acme", workspaces_dir, register=True, mirror_to=None)
+
+            register_mock.assert_called_once_with("acme/good-repo", "demo-skill")
+            self.assertTrue(result["repos"][0]["register_results"][0]["ok"])
+
+    def test_blocked_repo_is_excluded_from_aggregate_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspaces_dir = Path(temp_dir)
+            write_skill(workspaces_dir / "broken-repo", "demo-skill", "demo-skill", "")
+
+            def fake_ensure_clone(org, repo, ws_dir):
+                return ws_dir / repo
+
+            with patch("scripts.skill_publisher.list_org_repos", return_value=["broken-repo"]), \
+                 patch("scripts.skill_publisher.ensure_clone", side_effect=fake_ensure_clone):
+                result = publish_org("acme", workspaces_dir, register=False, mirror_to=None)
+
+            self.assertEqual("block", result["repos"][0]["status"])
+            self.assertEqual([], result["skills"])
 
 
 if __name__ == "__main__":

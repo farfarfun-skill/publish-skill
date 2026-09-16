@@ -29,6 +29,18 @@ Resolves the repo's GitHub slug from `git remote origin` and prints one `npx ski
 
 `all` runs `validate` then `manifest` in one call and shares the same `--fail-on` gate.
 
+## Publish An Entire Org In One Command
+
+```bash
+python3 scripts/skill_publisher.py org --org farfarfun-skill --workspaces-dir /path/to/farfarfun-skill
+```
+
+This is the one-shot "publish everything" entrypoint. It lists every public, non-fork repo in `--org` via `gh repo list`, clones any that aren't already checked out under `--workspaces-dir` (never pulls or mutates an existing clone), skips repos with no `skills/` directory, runs `validate` on the rest, and prints the combined install manifest across the whole org. `--workspaces-dir` defaults to the parent directory of `--workspace`, so running it from inside a repo that sits next to its siblings on disk needs no extra flags.
+
+Add `--register` to also run `npx skills add <owner>/<repo> --skill <name> -y` locally for every skill that passed validation — this is the actual mechanism that feeds skills.sh's install telemetry/leaderboard (there is no submission API) and it also installs the skill into this machine's agent skill directories, so only pass it when that side effect is wanted.
+
+Add `--mirror-to <org>` to additionally fork/sync every passing repo into a secondary org (see below).
+
 ## Mirror To Another Platform
 
 ```bash
