@@ -1,4 +1,0 @@
-interface:
-  display_name: "Publish Skill"
-  short_description: "Validate SKILL.md files, build the skills.sh install manifest, mirror to other orgs"
-  default_prompt: "Use $publish-skill to validate this repository's SKILL.md files, generate the skills.sh install manifest, and optionally mirror the repo to another GitHub org."
