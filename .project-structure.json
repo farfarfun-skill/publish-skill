@@ -1,0 +1,16 @@
+{
+  "version": 3,
+  "profiles": [
+    "generic"
+  ],
+  "applications": [],
+  "additional_zones": [
+    {
+      "path": "skills",
+      "owner": "engineering",
+      "purpose": "Codex skills, deterministic checkers, templates, and references",
+      "naming": "language-native"
+    }
+  ],
+  "allowed_root_files": []
+}
